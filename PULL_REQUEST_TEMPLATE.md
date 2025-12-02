@@ -1,66 +1,41 @@
-## 🧠 AI Agent Info
-- **Agent Name**: <!-- e.g. `magicfit.agent.recommender_v2` -->
-- **Prompt / Objective**: <!-- Copy the full or summarized prompt given to the AI -->
-- **Output Log / Metadata**: <!-- Link to `.agent-meta.json`, prompt, logs, etc -->
-- **Prompt Version**: <!-- e.g. prompt_v4.3.2 or GPT-4o -->
+# Summary
 
----
+- _What change are we making and why?_ Link relevant issues/tickets.
 
-## 🔗 Linked Linear Issue
-- Issue: `MF-###`
-- Fixes: [MF-###](https://linear.app/your-org/MF-###)
-- Branch: `feature/MF-###-[slug]`
+# Testing
 
----
+- [ ] Unit tests
+- [ ] Lint / static analysis
+- [ ] Type checks (if applicable)
+- [ ] Other (specify):
 
-## 🧩 Summary of Changes
-<!-- High-level summary of what the PR does -->
+# Definition of Done
 
-- What does this implement or fix?
-- Any agent-specific logic to highlight?
-- Areas that need extra attention?
+- [ ] Tests added or updated as needed
+- [ ] Automated checks above ran and passed
+- [ ] Feature highlight draft completed below (or marked N/A)
+- [ ] Documentation updated (README, runbooks, etc.)
+- [ ] AI commit summary reviewed (see section below)
 
----
+# Feature Highlight Draft
 
-## 🔬 Code Review Checklist
+Fill this in (or refine the AI draft) before requesting review.
 
-- [ ] Code is readable and well-organized
-- [ ] No hallucinated or unused functions
-- [ ] Follows team linting / conventions
-- [ ] Dependencies are valid and minimal
-- [ ] Backward compatibility preserved
-- [ ] Any sensitive logic reviewed manually
+```yaml
+feature_highlight:
+  headline: ""
+  summary: "" # concise 2-3 sentences for merchants
+  cta: ""      # short call to action if applicable
+  channels:
+    - blog
+    - email
+notes: ""       # launch timing, segmentation, etc.
+```
 
----
+# AI Commit Summary
 
-## ✅ Test Coverage
+> The AI agent fills this block on PR creation by summarizing all commits. Review and edit as needed before merge.
 
-### 🧪 Unit Tests
-- [ ] Added / updated tests
-- [ ] Edge cases handled
-- [ ] Negative / invalid input tested
+<!-- ai-commit-summary:start -->
 
-### 🚦 Integration or E2E
-- [ ] Connected flow tested
-- [ ] Manual test steps (if applicable):  
-  <!-- Example: `curl localhost:5000/healthcheck` -->
-
----
-
-## 📦 Versioning & Release
-
-- [ ] Label: `type:patch`, `type:minor`, or `type:major`
-- [ ] PR follows conventional commit or release label style
-- [ ] Changelog entry auto-generated or added
-
----
-
-## 🧠 Reviewer Notes
-<!-- Anything the reviewer should focus on -->
-<!-- e.g. “This AI-generated logic is correct but unfamiliar,” or “Please double-check the new regex patterns.” -->
-
----
-
-## 📚 References
-- Related PRs (cross-repo): <!-- Link to others if feature is multi-repo -->
-- Related Docs: <!-- API specs, system diagrams, or design docs -->
+<!-- ai-commit-summary:end -->
