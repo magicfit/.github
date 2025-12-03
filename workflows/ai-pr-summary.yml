@@ -1,0 +1,167 @@
+name: AI PR Summary
+
+on:
+  pull_request:
+    branches:
+      - develop
+    types: [opened, reopened, ready_for_review, synchronize]
+
+jobs:
+  summarize:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate AI summary block
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const prNumber = pr.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const body = pr.body ?? '';
+
+            if (!process.env.OPENAI_API_KEY) {
+              core.warning('OPENAI_API_KEY not set; skipping AI summary update.');
+              return;
+            }
+
+            let toneGuide = '';
+            try {
+              toneGuide = fs.readFileSync('docs/content-style.md', 'utf8');
+            } catch (error) {
+              core.warning(`Unable to load docs/content-style.md: ${error.message}`);
+            }
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            if (commits.length === 0) {
+              core.warning('No commits found for PR; skipping AI summary update.');
+              return;
+            }
+
+            const commitDigest = commits
+              .map((commit) => {
+                const titleLine = commit.commit.message.split('\n')[0];
+                const sha = commit.sha.substring(0, 7);
+                const author = commit.author?.login ?? commit.commit.author?.name ?? 'unknown';
+                return `- ${titleLine} (by ${author}, ${sha})`;
+              })
+              .join('\n');
+
+            const toneStart = '<!-- tone-notes:start -->';
+            const toneEnd = '<!-- tone-notes:end -->';
+            let toneOverrides = '';
+
+            const toneStartIndex = body.indexOf(toneStart);
+            const toneEndIndex = body.indexOf(toneEnd);
+
+            if (toneStartIndex !== -1 && toneEndIndex !== -1 && toneEndIndex > toneStartIndex) {
+              toneOverrides = body
+                .slice(toneStartIndex + toneStart.length, toneEndIndex)
+                .trim();
+            }
+
+            const promptLines = [
+              `Repository: ${owner}/${repo}`,
+              `PR Title: ${pr.title}`,
+              `Base Branch: ${pr.base.ref}`,
+              `Head Branch: ${pr.head.ref}`,
+              `Commit Highlights:\n${commitDigest}`,
+            ];
+
+            if (toneOverrides) {
+              promptLines.push(`Tone adjustments from PR author:\n${toneOverrides}`);
+            }
+
+            const prompt = promptLines.join('\n\n');
+
+            const systemMessageParts = [
+              'You are the Magic Fit release note assistant.',
+              'Summarize the commits into 2 concise paragraphs appropriate for a merchant-facing blog/email update.',
+              'Emphasize customer outcomes, key improvements, and measurable impact.',
+              'After the paragraphs, add a bullet list titled "Suggested CTAs" with 2-3 short call-to-action lines.',
+              'Do not repeat raw commit messages or reference internal tooling.',
+            ];
+
+            if (toneGuide.trim()) {
+              systemMessageParts.push(`Use the following tone guide when writing:\n${toneGuide}`);
+            }
+
+            const systemMessage = systemMessageParts.join('\n\n');
+
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                temperature: 0.35,
+                max_tokens: 600,
+                messages: [
+                  { role: 'system', content: systemMessage },
+                  { role: 'user', content: prompt },
+                ],
+              }),
+            });
+
+            if (!response.ok) {
+              const errText = await response.text();
+              core.warning(`OpenAI API request failed: ${errText}`);
+              return;
+            }
+
+            const data = await response.json();
+            const summary = data.choices?.[0]?.message?.content?.trim();
+
+            if (!summary) {
+              core.warning('OpenAI response did not include content.');
+              return;
+            }
+
+            const startMarker = '<!-- ai-commit-summary:start -->';
+            const endMarker = '<!-- ai-commit-summary:end -->';
+
+            const startIndex = body.indexOf(startMarker);
+            const endIndex = body.indexOf(endMarker);
+
+            if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+              core.warning('PR body missing AI summary markers; skipping update.');
+              return;
+            }
+
+            const before = body.slice(0, startIndex + startMarker.length);
+            const after = body.slice(endIndex);
+            const newBody = `${before}\n\n${summary}\n\n${after}`;
+
+            if (newBody === body) {
+              core.info('AI summary unchanged.');
+              return;
+            }
+
+            await github.rest.pulls.update({
+              owner,
+              repo,
+              pull_number: prNumber,
+              body: newBody,
+            });
+
+            core.notice('Updated PR body with AI commit summary.');
+
