@@ -11,7 +11,7 @@ on:
       max-turns:
         description: Max orchestrator turns
         required: false
-        default: 40
+        default: 25
         type: number
     secrets:
       ANTHROPIC_API_KEY:
@@ -67,7 +67,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model ${{ inputs.orchestrator-model }} --max-turns ${{ inputs.max-turns }}"
+          claude_args: >-
+            --model ${{ inputs.orchestrator-model }}
+            --max-turns ${{ inputs.max-turns }}
+            --allowed-tools "Bash,Read,Write,Edit,Glob,Grep,Task,WebFetch"
           prompt: ${{ steps.prompt.outputs.content }}
 
       - name: Read blocking-issues marker
