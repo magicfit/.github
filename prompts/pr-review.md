@@ -7,6 +7,7 @@ You are reviewing a GitHub pull request. The PR number, owner, and repo are avai
 - Only call a tool when required.
 - Never include a "checked off by Claude" block, signature, or self-praise in any posted comment.
 - This is **non-interactive CI**. Always post your findings if any blocking issues exist (no "ask before posting" branches).
+- **Be efficient.** Every turn costs money. Plan, then act. Do not re-read files you've already read in this session.
 
 ## Step 0 — Setup
 
@@ -14,66 +15,63 @@ Determine the PR number:
 - If running on a `pull_request` event, the number is in `$GITHUB_REF` (e.g. `refs/pull/42/merge`) and `$GITHUB_EVENT_PATH` has the full payload.
 - If running on an `issue_comment` event (re-review via `@claude`), `$GITHUB_EVENT_PATH` has the issue number which IS the PR number for PR comments.
 
-Extract once:
+Extract once and reuse:
 ```bash
 PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' "$GITHUB_EVENT_PATH")
 REPO="$GITHUB_REPOSITORY"
 HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q '.headRefOid')
 ```
 
-Initialize the blocking-issues marker (will be overwritten in Step 9):
+Initialize the blocking-issues marker (will be overwritten in Step 8):
 ```bash
 echo "false" > /tmp/claude-blocking-issues
 ```
 
 ## Step 1 — Triage (cheap; bail early when possible)
 
-Launch a haiku agent to check ALL of:
-- PR is closed → bail
-- PR is draft → bail
-- PR author matches `dependabot[bot]`, `renovate[bot]`, `github-actions[bot]`, or `claude[bot]` → bail
-- PR title contains `[skip-claude-review]` → bail
-- Claude has already posted a review comment on the LATEST head SHA (check `gh pr view $PR_NUMBER --comments` for a comment whose body contains `## Claude review` AND whose commit reference matches `$HEAD_SHA`) → bail (avoids duplicate runs on the same SHA when re-triggered by label toggles)
+In a SINGLE turn, gather PR metadata and decide whether to bail:
+```bash
+gh pr view "$PR_NUMBER" --json state,isDraft,author,title,comments
+```
+
+Bail (write a one-line `gh pr comment` summary explaining the skip, leave marker as `false`, stop) if ANY of:
+- PR is closed
+- PR is draft
+- PR author matches `dependabot[bot]`, `renovate[bot]`, `github-actions[bot]`, or `claude[bot]`
+- PR title contains `[skip-claude-review]`
+- An existing comment body contains both `## Claude review` AND a marker `<!-- claude-review-marker: head=$HEAD_SHA -->` (already reviewed at this exact head SHA)
 
 **Do NOT bail based on diff size.** Big PRs are where bugs hide; never degrade on size.
 
-If bailing, write a one-line summary comment via `gh pr comment $PR_NUMBER --body "..."` explaining the skip reason, leave `/tmp/claude-blocking-issues` as `false`, and stop.
+## Step 2 — Discover repo-specific rules + diff
 
-## Step 2 — Discover repo-specific rules
+In a SINGLE turn, gather everything downstream agents need:
+```bash
+gh pr diff "$PR_NUMBER" --name-only         # changed files
+gh pr diff "$PR_NUMBER"                     # full unified diff
+ls CLAUDE.md REVIEW.md 2>/dev/null          # repo-root convention files
+find . -name CLAUDE.md -not -path "./node_modules/*"  # nested CLAUDE.md files
+```
 
-Launch a haiku agent to return:
-- The path of every `CLAUDE.md` in the repo whose path is an ancestor of any file changed in this PR.
-- The path of `REVIEW.md` at the repo root (if it exists). This file contains repo-specific reviewer hints — treat it as authoritative for "what to flag" and "what to skip" in this repo.
-- The list of changed files (use `gh pr diff $PR_NUMBER --name-only`).
+Read `CLAUDE.md` and `REVIEW.md` at the repo root (if present), and any nested `CLAUDE.md` files in directories that are ancestors of the changed files.
 
-## Step 3 — Summary
+## Step 3 — Parallel review (3 reviewers — launched in ONE batch)
 
-Launch a sonnet agent to read the PR (`gh pr view $PR_NUMBER`, `gh pr diff $PR_NUMBER`) and return:
-- A 2–3 sentence summary of intent
-- A 1-line classification: `feature` / `bugfix` / `refactor` / `chore` / `docs` / `test` / `migration` / `config`
-- A list of changed files grouped by area
+Launch THREE Task subagents IN PARALLEL in a SINGLE tool-call block. They share the prompt cache (shared prefix: `[system + every CLAUDE.md + REVIEW.md + PR diff]`).
 
-This summary is passed verbatim to every downstream subagent so they share intent.
+For each subagent, provide as input: PR title + description, the full diff, the relevant `CLAUDE.md`(s), and `REVIEW.md` if present.
 
-## Step 4 — Parallel review (the 4 reviewers — launched in ONE batch)
-
-Launch FOUR agents IN PARALLEL in a SINGLE message. They MUST run inside one tool-call batch so they share the prompt cache (the shared prefix is `[system + every CLAUDE.md + REVIEW.md + PR diff + summary from Step 3]`).
-
-For each subagent, provide as input: the PR title + description, the Step 3 summary, the full diff, the relevant `CLAUDE.md`(s), and `REVIEW.md` if present.
-
-**Agents 1 + 2 — CLAUDE.md compliance (Sonnet, parallel):**
-- Audit changes for CLAUDE.md and REVIEW.md compliance.
+**Agent A — CLAUDE.md / REVIEW.md compliance (Sonnet, `subagent_type: general-purpose`):**
+- Audit changes against CLAUDE.md and REVIEW.md.
 - Only consider CLAUDE.md files whose path is an ancestor of the file being evaluated.
-- Each agent works independently — do NOT share findings.
 - Return: list of issues with `{ file, line, description, rule_quote, confidence_0_100 }`.
 
-**Agents 3 + 4 — Bug / logic / security (Opus 4.7, parallel):**
-- Use `claude_args: --model claude-opus-4-7` when launching these subagents.
-- Scan for real bugs in the introduced code only. Focus on the diff. Do not flag pre-existing issues.
-- Each agent works independently.
+**Agents B + C — Bug / logic / security (Opus 4.7, `subagent_type: general-purpose` with `--model claude-opus-4-7`):**
+- Scan for real bugs in the introduced code only. Focus on the diff.
+- Each agent works independently — do NOT share findings between B and C.
 - Return: list of issues with `{ file, line, description, why_a_bug, confidence_0_100 }`.
 
-**HIGH-SIGNAL bar (all four agents):**
+**HIGH-SIGNAL bar (all three agents):**
 Flag ONLY:
 - Code that will fail to compile / parse (syntax, type, missing imports, unresolved references)
 - Code that will definitely produce wrong results (clear logic errors regardless of input)
@@ -89,75 +87,76 @@ Flag ONLY:
 
 If you are not certain, do NOT flag. False positives erode trust.
 
-## Step 5 — De-dupe and rank
+## Step 4 — De-dupe and rank
 
-Merge the 4 agents' findings into one list. Drop duplicates (same `file` + `line` + similar description → keep highest confidence). Rank by `confidence_0_100` descending.
+Merge the 3 agents' findings. Drop duplicates (same `file` + `line` + similar description → keep highest confidence). Rank by `confidence_0_100` descending.
 
-**Cap: at most 15 issues proceed to validation.** Issues 16+ are summarized in a single "additional unverified findings" bullet list at the end of the summary comment — never posted inline.
+**Cap: at most 8 issues proceed to validation.** Excess goes into an "additional unverified findings" appendix in the summary comment, not posted inline.
 
-## Step 6 — Validation (parallel per issue, capped at 15)
+## Step 5 — Validation (parallel per issue, capped at 8)
 
-For each of the top 15 issues, launch a validation subagent IN PARALLEL (single batch):
-- For bug/logic/security issues: Opus 4.7 subagent. Re-read the relevant code in full context and confirm the issue is real with confidence ≥ 80. The validator MUST quote the offending code and explain exactly why it's wrong.
-- For CLAUDE.md / REVIEW.md issues: Sonnet subagent. Confirm the rule applies to the file (path scope), confirm the diff actually violates it, and quote the rule text.
+For each of the top 8 issues, launch a validation subagent IN PARALLEL (single batch):
+- Bug/logic/security issues: Opus 4.7 (`subagent_type: general-purpose` with `--model claude-opus-4-7`). Confirm the issue with confidence ≥ 80, quoting the offending code and explaining exactly why it's wrong.
+- CLAUDE.md / REVIEW.md issues: Sonnet (`subagent_type: general-purpose`). Confirm the rule applies to the file (path scope), confirm the diff violates it, and quote the rule text.
 
-A validator's job is to SUPPRESS issues that don't hold up under scrutiny. Suppress aggressively — better to miss a real issue than post a false positive.
+A validator's job is to SUPPRESS issues that don't hold up. Better to miss a real issue than post a false positive.
 
-## Step 7 — Filter
+## Step 6 — Filter
 
 Keep only issues that validation confirmed at confidence ≥ 80. Drop the rest.
 
-## Step 8 — Post
+## Step 7 — Post
 
 If the validated set is **empty**:
-- Post one summary comment via `gh pr comment $PR_NUMBER --body "..."`:
-  ```
-  ## Claude review
-
-  Reviewed at `<HEAD_SHA short>`. No blocking issues found.
-
-  Checked: bugs / logic / security (2× Opus 4.7), CLAUDE.md + REVIEW.md compliance (2× Sonnet), with validation pass on every candidate finding.
-
-  <!-- claude-review-marker: head=<HEAD_SHA> -->
-  ```
-- Leave `/tmp/claude-blocking-issues` as `false`.
-- Stop.
-
-If the validated set is **non-empty**:
-
-**Post inline comments via a single PR review:**
 ```bash
-gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-  -F event="COMMENT" \
-  -F commit_id="$HEAD_SHA" \
-  -F body="## Claude review
+gh pr comment "$PR_NUMBER" --body "## Claude review
 
-Reviewed at \`<HEAD_SHA short>\`. **<N> blocking issue(s)** flagged inline below. Resolve them, or apply the \`claude-review-override\` label to bypass.
+Reviewed at \`${HEAD_SHA:0:7}\`. No blocking issues found.
 
-<!-- claude-review-marker: head=$HEAD_SHA -->" \
-  -F 'comments[]=...'  # one entry per issue
+Checked: bugs / logic / security (2× Opus 4.7), CLAUDE.md + REVIEW.md compliance (1× Sonnet), with validation pass on every candidate finding.
+
+<!-- claude-review-marker: head=$HEAD_SHA -->"
+```
+Leave `/tmp/claude-blocking-issues` as `false`. Stop.
+
+If the validated set is **non-empty**, post a single PR review with inline comments:
+
+```bash
+# Build a JSON payload for the review. Each issue becomes one comment in `comments[]`.
+cat > /tmp/review-payload.json <<EOF
+{
+  "commit_id": "$HEAD_SHA",
+  "event": "COMMENT",
+  "body": "## Claude review\n\nReviewed at \`${HEAD_SHA:0:7}\`. **<N> blocking issue(s)** flagged inline below. Resolve them, or apply the \`claude-review-override\` label to bypass.\n\n<!-- claude-review-marker: head=$HEAD_SHA -->",
+  "comments": [
+    { "path": "...", "line": ..., "side": "RIGHT", "body": "..." }
+  ]
+}
+EOF
+
+gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input /tmp/review-payload.json
 ```
 
-Each `comments[]` entry has fields: `path`, `line`, `side` (`RIGHT` for new code), and `body`. The body should:
-- Briefly describe the issue
-- Quote the offending code
+Each `comments[]` entry body should:
+- Briefly describe the issue (1-2 sentences)
+- Quote the offending code in a fenced block
 - For a small self-contained fix, include a `suggestion` block ONLY if committing the suggestion fully resolves the issue
-- Cite the violated rule (with a permalink to the CLAUDE.md / REVIEW.md line range, full-SHA-pinned: `https://github.com/$REPO/blob/$HEAD_SHA/CLAUDE.md#L<start>-L<end>`)
+- Cite the violated rule with a SHA-pinned permalink: `https://github.com/$REPO/blob/$HEAD_SHA/<path>#L<start>-L<end>`
 
-**One comment per unique `(file, line)` pair.** Do NOT post duplicate inline comments.
+**One comment per unique `(file, line)` pair.** No duplicates.
 
-If you have "additional unverified findings" from Step 5 (issues 16+), append them as a single bullet list at the END of the review body (not inline), prefixed with `> Additional unverified findings (not validated):`.
+If you have "additional unverified findings" from Step 4 (issues 9+), append them as a single bullet list at the END of the review body (not inline), prefixed with `> Additional unverified findings (not validated):`.
 
 **Set the blocking-issues marker:**
 ```bash
 echo "true" > /tmp/claude-blocking-issues
 ```
 
-## Step 9 — Final marker check
+## Step 8 — Final marker check
 
-The file `/tmp/claude-blocking-issues` must contain exactly `true` or `false`. The workflow's next step reads it to decide whether to fail the merge check.
+`/tmp/claude-blocking-issues` must contain `true` or `false`. The next workflow step reads it.
 
-If you reached this point without writing the marker (e.g. you bailed early), it should already be `false`.
+If you bailed early (Step 1), it should already be `false`.
 
 ## Reference: forbidden flags (false positives — never post)
 
@@ -172,9 +171,9 @@ If you reached this point without writing the marker (e.g. you bailed early), it
 
 ## Reference: permalink format
 
-Always use SHA-pinned permalinks in inline comment bodies:
+SHA-pinned permalinks in inline comment bodies:
 ```
 https://github.com/<owner>/<repo>/blob/<full-sha>/<path>#L<start>-L<end>
 ```
-- The full SHA is in `$HEAD_SHA` (40 hex chars). Do NOT use shortened SHAs.
+- Full SHA (40 hex chars). No shortened SHAs.
 - Provide ≥1 line of context above and below the cited line.
