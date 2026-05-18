@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       orchestrator-model:
-        description: Model for the orchestrator
+        description: Model for the orchestrator (dispatches subagents — Sonnet is sufficient)
         required: false
         default: claude-sonnet-4-6
         type: string
@@ -26,4 +26,63 @@ jobs:
       issues: read
       id-token: write
     steps:
-      - run: echo "with permissions"
+      - name: Check override label
+        id: override
+        run: |
+          set -euo pipefail
+          if jq -e '(.pull_request.labels // []) | map(.name) | index("claude-review-override")' "$GITHUB_EVENT_PATH" > /dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::claude-review-override label present — skipping review, check passes."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.override.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch review prompt from org repo
+        if: steps.override.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pr-review.md \
+            "https://raw.githubusercontent.com/magicfit/.github/main/prompts/pr-review.md"
+          wc -l /tmp/pr-review.md
+
+      - name: Load prompt into output
+        if: steps.override.outputs.skip != 'true'
+        id: prompt
+        run: |
+          {
+            echo 'content<<PROMPT_EOF'
+            cat /tmp/pr-review.md
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude review
+        if: steps.override.outputs.skip != 'true'
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--model ${{ inputs.orchestrator-model }} --max-turns ${{ inputs.max-turns }}"
+          prompt: ${{ steps.prompt.outputs.content }}
+
+      - name: Read blocking-issues marker
+        if: steps.override.outputs.skip != 'true'
+        id: check
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/claude-blocking-issues ] && [ "$(cat /tmp/claude-blocking-issues)" = "true" ]; then
+            echo "has-blocking-issues=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-blocking-issues=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enforce blocking issues
+        if: steps.override.outputs.skip != 'true' && steps.check.outputs.has-blocking-issues == 'true'
+        run: |
+          echo "::error::Claude flagged blocking issues. Resolve them, or apply the 'claude-review-override' label to bypass."
+          exit 1
