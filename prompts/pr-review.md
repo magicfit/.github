@@ -69,6 +69,7 @@ For each subagent, provide as input: PR title + description, the full diff, the 
 **Agents B + C — Bug / logic / security (Opus 4.7, `subagent_type: general-purpose` with `--model claude-opus-4-7`):**
 - Scan for real bugs in the introduced code only. Focus on the diff.
 - Each agent works independently — do NOT share findings between B and C.
+- **Do NOT load CLAUDE.md, REVIEW.md, or other repo convention files.** Your job is bug detection only — Agent A covers compliance. Read the diff + minimal surrounding context for each changed function. Saves ~3k input tokens per agent (significant given Opus pricing).
 - Return: list of issues with `{ file, line, description, why_a_bug, confidence_0_100 }`.
 
 **HIGH-SIGNAL bar (all three agents):**
@@ -93,9 +94,18 @@ Merge the 3 agents' findings. Drop duplicates (same `file` + `line` + similar de
 
 **Cap: at most 8 issues proceed to validation.** Excess goes into an "additional unverified findings" appendix in the summary comment, not posted inline.
 
-## Step 5 — Validation (parallel per issue, capped at 8)
+## Step 5 — Validation (selective — only when needed)
 
-For each of the top 8 issues, launch a validation subagent IN PARALLEL (single batch):
+The validation pass is **expensive** (each validator is a fresh subagent call with no cache hit). Skip it when the initial reviewer was already confident:
+
+**Skip validation for any finding where ALL of the following hold:**
+- `confidence_0_100 >= 90` from the initial reviewer
+- The finding has a specific `file` + `line` anchor (not a "somewhere in the diff" finding)
+- The reviewer quoted the exact offending code in their description
+
+These are almost always real and don't need a second pass. Move them straight to Step 6 with their original confidence.
+
+**Validate the rest** (top 8 issues with confidence < 90 OR missing a line anchor), in parallel:
 - Bug/logic/security issues: Opus 4.7 (`subagent_type: general-purpose` with `--model claude-opus-4-7`). Confirm the issue with confidence ≥ 80, quoting the offending code and explaining exactly why it's wrong.
 - CLAUDE.md / REVIEW.md issues: Sonnet (`subagent_type: general-purpose`). Confirm the rule applies to the file (path scope), confirm the diff violates it, and quote the rule text.
 
