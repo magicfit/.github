@@ -26,17 +26,4 @@ jobs:
       issues: read
       id-token: write
     steps:
-      - name: Check override label
-        id: override
-        run: |
-          set -euo pipefail
-          if jq -e '(.pull_request.labels // []) | map(.name) | index("claude-review-override")' "$GITHUB_EVENT_PATH" > /dev/null; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::claude-review-override label present"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Echo
-        if: steps.override.outputs.skip != 'true'
-        run: echo "skip=${{ steps.override.outputs.skip }}"
+      - run: echo "with permissions"
