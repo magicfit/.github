@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       orchestrator-model:
-        description: Model for the orchestrator (dispatches subagents — Sonnet is sufficient)
+        description: Model for the orchestrator
         required: false
         default: claude-sonnet-4-6
         type: string
@@ -20,39 +20,5 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: read
-      id-token: write
     steps:
-      - name: Check override label
-        id: override
-        run: |
-          set -euo pipefail
-          if jq -e '(.pull_request.labels // []) | map(.name) | index("claude-review-override")' "$GITHUB_EVENT_PATH" > /dev/null; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::claude-review-override label present — skipping review, check passes."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout
-        if: steps.override.outputs.skip != 'true'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Fetch review prompt from org repo
-        if: steps.override.outputs.skip != 'true'
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/pr-review.md \
-            "https://raw.githubusercontent.com/magicfit/.github/main/prompts/pr-review.md"
-          wc -l /tmp/pr-review.md
-
-      - name: Echo inputs
-        if: steps.override.outputs.skip != 'true'
-        run: |
-          echo "orchestrator-model=${{ inputs.orchestrator-model }}"
-          echo "max-turns=${{ inputs.max-turns }}"
+      - run: echo "reusable workflow alive"
