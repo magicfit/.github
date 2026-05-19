@@ -64,6 +64,14 @@ jobs:
       - name: Run Claude review
         if: steps.override.outputs.skip != 'true'
         id: claude
+        # Graceful degradation: do NOT fail the job when the action errors.
+        # Most common cause is Anthropic spend exhausted / org cost-meter
+        # refusing the OIDC token exchange (manifests as a 401 on App-token
+        # exchange). A follow-up step inspects `steps.claude.outcome` and
+        # posts a skip comment on the PR so a human knows to retry or
+        # proceed manually. Bug-class failures still surface in the
+        # Actions tab — they just don't block merge.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -73,11 +81,42 @@ jobs:
             --allowed-tools "Bash,Read,Write,Edit,Glob,Grep,Task,WebFetch"
           prompt: ${{ steps.prompt.outputs.content }}
 
+      - name: Notify skip on action failure
+        # Fires only when the Claude step ran (no override) AND failed. Posts
+        # a single PR comment so reviewers know the automated pass was
+        # skipped and have a clear retry path. Never fails the workflow.
+        if: steps.override.outputs.skip != 'true' && steps.claude.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            if (!prNumber) return;
+            const runUrl = process.env.RUN_URL;
+            const body = [
+              ':warning: **Automated Claude review skipped.**',
+              '',
+              `The review action couldn't complete — most commonly because Anthropic spend is exhausted or the org cost-meter declined the OIDC token exchange. Details: [Actions run](${runUrl}).`,
+              '',
+              'To retry: comment `@claude review` once spend resets. To bypass: apply the `claude-review-override` label.',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+
       - name: Read blocking-issues marker
         if: steps.override.outputs.skip != 'true'
         id: check
         run: |
           set -euo pipefail
+          # When the Claude step failed (spend exhaustion, OIDC denial, etc.)
+          # the marker file won't exist — fall through to has-blocking-issues=false
+          # so the workflow doesn't enforce against an absent verdict.
           if [ -f /tmp/claude-blocking-issues ] && [ "$(cat /tmp/claude-blocking-issues)" = "true" ]; then
             echo "has-blocking-issues=true" >> "$GITHUB_OUTPUT"
           else
