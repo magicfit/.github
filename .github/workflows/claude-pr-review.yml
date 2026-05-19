@@ -151,9 +151,13 @@ jobs:
             exit 0
           fi
 
-          # The Claude Code SDK writes a result line per run. Extract the last
-          # one (most recent if there were retries).
-          RESULT_JSON=$(jq -c 'select(.type == "result") | .' "$EXECUTION_FILE" | tail -1)
+          # The Claude Code SDK writes its execution output as a JSON ARRAY
+          # of message objects (not newline-delimited JSON, as earlier code
+          # assumed — caused `jq: Cannot index array with string "type"`).
+          # Iterate with `.[]` to handle the array; fall back to treating it
+          # as a single object if the file shape changes in a future SDK
+          # release.
+          RESULT_JSON=$(jq -c '(if type == "array" then .[] else . end) | select(.type == "result")' "$EXECUTION_FILE" | tail -1)
           if [ -z "$RESULT_JSON" ]; then
             echo "No result line in execution file — skipping cost record."
             exit 0
