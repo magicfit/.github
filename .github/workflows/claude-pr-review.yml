@@ -16,6 +16,9 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: true
+      MAGICFIT_METER_TOKEN:
+        description: Supabase anon key for the central claude_call_costs table. Optional — recording is skipped if missing.
+        required: false
 
 jobs:
   review:
@@ -82,6 +85,92 @@ jobs:
             echo "has-blocking-issues=true" >> "$GITHUB_OUTPUT"
           else
             echo "has-blocking-issues=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record cost to meter
+        # Fire-and-forget; always runs (even on Claude failure / override skip)
+        # so the meter has data for failed/skipped runs too. Never fails the workflow.
+        if: always() && steps.override.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          METER_URL: https://mjjzzbriqvdyfycqajvh.supabase.co/rest/v1/claude_call_costs
+          METER_TOKEN: ${{ secrets.MAGICFIT_METER_TOKEN }}
+          ORCH_MODEL: ${{ inputs.orchestrator-model }}
+          BLOCKING: ${{ steps.check.outputs.has-blocking-issues }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${METER_TOKEN:-}" ]; then
+            echo "MAGICFIT_METER_TOKEN not set — skipping cost record."
+            exit 0
+          fi
+          EXECUTION_FILE="/home/runner/work/_temp/claude-execution-output.json"
+          if [ ! -f "$EXECUTION_FILE" ]; then
+            echo "Execution file not found at $EXECUTION_FILE — Claude step may have failed before completing."
+            exit 0
+          fi
+
+          # The Claude Code SDK writes a result line per run. Extract the last
+          # one (most recent if there were retries).
+          RESULT_JSON=$(jq -c 'select(.type == "result") | .' "$EXECUTION_FILE" | tail -1)
+          if [ -z "$RESULT_JSON" ]; then
+            echo "No result line in execution file — skipping cost record."
+            exit 0
+          fi
+
+          COST_USD=$(echo "$RESULT_JSON" | jq -r '.total_cost_usd // 0')
+          DURATION_MS=$(echo "$RESULT_JSON" | jq -r '.duration_ms // 0')
+          NUM_TURNS=$(echo "$RESULT_JSON" | jq -r '.num_turns // 0')
+          DENIALS=$(echo "$RESULT_JSON" | jq -r '.permission_denials_count // 0')
+
+          # Token counts aren't in the SDK summary line — we record 0 here
+          # and rely on cost_usd for spend analysis. Future iteration could
+          # parse per-message usage from the full execution log.
+          PAYLOAD=$(jq -n \
+            --arg model "$ORCH_MODEL" \
+            --arg repo "$REPO" \
+            --arg pr "$PR_NUMBER" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg blocking "$BLOCKING" \
+            --argjson cost "$COST_USD" \
+            --argjson duration "$DURATION_MS" \
+            --argjson turns "$NUM_TURNS" \
+            --argjson denials "$DENIALS" \
+            '{
+              model: $model,
+              api_key_label: "pr-review",
+              service: "magicfit-github-actions",
+              job_kind: "pr-review",
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_tokens: 0,
+              cache_creation_tokens: 0,
+              cost_usd: $cost,
+              job_ref: ($repo + "/pull/" + $pr),
+              duration_ms: $duration,
+              metadata: {
+                head_sha: $head_sha,
+                num_turns: $turns,
+                permission_denials_count: $denials,
+                blocking_issues: ($blocking == "true")
+              }
+            }')
+
+          echo "Posting cost record (cost=\$$COST_USD, turns=$NUM_TURNS, blocking=$BLOCKING)..."
+          HTTP_CODE=$(curl -sS -o /tmp/meter-response.txt -w "%{http_code}" \
+            -X POST "$METER_URL" \
+            -H "apikey: $METER_TOKEN" \
+            -H "Authorization: Bearer $METER_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d "$PAYLOAD" || echo "000")
+
+          if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
+            echo "::notice::Cost record posted (HTTP $HTTP_CODE) — \$$COST_USD"
+          else
+            echo "::warning::Meter POST returned HTTP $HTTP_CODE: $(cat /tmp/meter-response.txt | head -c 200)"
           fi
 
       - name: Enforce blocking issues
